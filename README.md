@@ -183,6 +183,31 @@ ExtType(code=42, data='xyzzy')
 You can use it with `default` and `ext_hook`. See below.
 
 
+### Decimal extension
+
+`msgpack.decimal` provides an optional pure-Python entry point for applications
+that choose an ext code for `decimal.Decimal`.  It preserves the exact Decimal
+tuple, so `1.00` and `1` keep their original exponents.  The ext code is chosen
+by the caller and other ext codes, including timestamps, pass through the caller's
+own `ext_hook`.
+
+```pycon
+>>> from decimal import Decimal
+>>> from msgpack.decimal import packb, unpackb
+>>> packed = packb({"value": Decimal("1.00")}, 42)
+>>> unpackb(packed, 42)
+{'value': Decimal('1.00')}
+```
+
+Legacy payloads with decimal strings are not converted automatically; they still
+unpack as `str`, and the application can migrate them with `Decimal(value)` when
+ready.  Non-finite values (`Infinity`, `NaN`, and `sNaN`, including their signs)
+are encoded and decoded as Decimal rather than converted to floats.
+
+See also `make_decimal_default` and `make_decimal_ext_hook` for composing with
+existing `default` and `ext_hook` callbacks.
+
+
 ### Security
 
 When unpacking data received from an unreliable source, msgpack provides

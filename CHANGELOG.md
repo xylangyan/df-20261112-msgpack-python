@@ -1,3 +1,13 @@
+# Unreleased
+
+- Add `msgpack.decimal`, an optional pure-Python pack/unpack entry point for
+  applications that agree on a MessagePack ext code for `decimal.Decimal`.
+  It preserves the exact Decimal tuple (including negative zero, positive and
+  negative exponents, and long coefficients), encodes non-finite values
+  explicitly, composes with caller-provided `default` and `ext_hook`, and
+  leaves legacy decimal strings untouched.
+
+
 # 1.2.4
 
 Release Date: 2026-10-27

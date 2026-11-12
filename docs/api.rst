@@ -31,6 +31,12 @@ API reference
     :members:
     :special-members: __init__
 
+Application Decimal extension (pure Python)
+-------------------------------------------
+
+.. automodule:: msgpack.decimal
+    :members:
+
 exceptions
 ----------
 
