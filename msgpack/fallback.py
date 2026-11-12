@@ -1,5 +1,6 @@
 """Fallback pure Python implementation of msgpack"""
 
+import operator
 import struct
 import sys
 from datetime import datetime as _DateTime
@@ -48,7 +49,7 @@ else:
         pass
 
 
-from .exceptions import BufferFull, ExtraData, FormatError, OutOfData, StackError
+from .exceptions import BufferFull, ExtraData, FormatError, OutOfData, PackBufferFull, StackError
 from .ext import ExtType, Timestamp
 
 EX_SKIP = 0
@@ -77,6 +78,17 @@ def _get_data_from_buffer(obj):
     view = memoryview(obj)
     if view.itemsize != 1:
         raise ValueError("cannot unpack from multi-byte object")
+    return view
+
+
+def _get_pack_into_view(obj):
+    view = memoryview(obj)
+    if view.readonly:
+        raise TypeError("cannot pack into read-only memory")
+    if not view.contiguous:
+        raise ValueError("cannot pack into non-contiguous memory")
+    if view.itemsize != 1:
+        view = view.cast("B")
     return view
 
 
@@ -834,6 +846,48 @@ class Packer:
             ret = self._buffer.getvalue()
             self._buffer = BytesIO()
             return ret
+
+    def pack_into(self, buffer, offset, obj):
+        """Pack *obj* into *buffer* starting at *offset*.
+
+        *buffer* must be a writable, contiguous memoryview (or an object
+        supporting the writable buffer protocol); views with larger item
+        sizes are treated as byte buffers.  The slot is the slice from
+        *offset* to the end of the view.  When the packed record fits, it is
+        written there and the offset immediately past the record is returned.
+        When it does not fit, :class:`PackBufferFull` is raised and its
+        ``needed`` attribute is the number of bytes the record requires; in
+        that case *buffer* is left completely untouched.
+
+        The record is packed through the normal :class:`Packer` rules, so
+        nested values, extension types, and ``default`` behave exactly like
+        :meth:`pack`.  ``default`` is called at most once for each value.
+        """
+        view = _get_pack_into_view(buffer)
+        offset = operator.index(offset)
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        if offset > len(view):
+            raise ValueError(
+                f"offset {offset} is outside the buffer of {len(view)} bytes"
+            )
+
+        # Pack into a private buffer first.  This keeps the destination
+        # untouched when packing fails or when the record does not fit, and
+        # makes sure a user supplied ``default`` callback runs only once.
+        old_buffer = self._buffer
+        self._buffer = BytesIO()
+        try:
+            self._pack(obj)
+            packed = self._buffer.getvalue()
+        finally:
+            self._buffer = old_buffer
+
+        packed_len = len(packed)
+        if offset + packed_len > len(view):
+            raise PackBufferFull(packed_len)
+        view[offset : offset + packed_len] = packed
+        return offset + packed_len
 
     def pack_map_pairs(self, pairs):
         self._pack_map_pairs(len(pairs), pairs)

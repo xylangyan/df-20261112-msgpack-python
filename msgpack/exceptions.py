@@ -11,6 +11,17 @@ class BufferFull(UnpackException):
     pass
 
 
+class PackBufferFull(BufferFull, ValueError, BufferError):
+    """Raised when `Packer.pack_into()` does not fit in the target slot.
+
+    :ivar needed: Number of bytes the record requires.
+    """
+
+    def __init__(self, needed):
+        self.needed = needed
+        super().__init__(f"packed record requires {needed} bytes")
+
+
 class OutOfData(UnpackException):
     pass
 

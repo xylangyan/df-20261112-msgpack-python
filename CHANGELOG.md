@@ -1,3 +1,12 @@
+# Unreleased
+
+- Add `Packer.pack_into(buffer, offset, obj)` to the pure Python packer.
+  It packs one record into a writable, contiguous memory view starting at
+  *offset* and returns the end offset.  When the record does not fit,
+  `PackBufferFull` is raised with a `needed` attribute holding the required
+  number of bytes, without modifying the target. Read-only or
+  non-contiguous views and invalid offsets raise explicit errors.
+
 # 1.2.4
 
 Release Date: 2026-10-27
