@@ -141,6 +141,40 @@ True
 ```
 
 
+### String-table references (optional)
+
+When every record in a partition repeats the same large strings (device
+types, regions, status labels), publish the strings once and encode later
+occurrences as small extension references.  The receiving program fetches the
+partition header (the table) before decoding the rows.
+
+```pycon
+>>> from msgpack import StringTablePacker, StringTableUnpacker
+>>> table = ["sensor-A", "sensor-B"]
+>>> packer = StringTablePacker(table)
+>>> packed = packer.pack({"device": "sensor-A", "value": 1})
+>>> packed
+b'\x82\xa6device\xd4@\x00\xa5value\x01'
+>>> StringTableUnpacker(table).unpackb(packed)
+{'device': 'sensor-A', 'value': 1}
+```
+
+Strings not present in the table are packed as ordinary strings.  Nested
+containers, binary values, timestamps and all other MessagePack types keep
+their normal encoding.  A table belongs to one partition/decoder: install it
+with ``StringTableUnpacker(table)`` or replace it with ``set_table()``.  Two
+decoders can be used interleaved without sharing state, and an index that is
+invalid for the current table raises ``InvalidStringTableIndexError`` instead
+of falling back to a previous table.
+
+The reference code defaults to ``0x40`` and can be changed with ``ext_code``.
+The timestamp code ``-1`` is reserved; requesting it raises
+``StringTableConflictError``.  If a reference arrives without a table,
+``MissingStringTableError`` is raised unless the decoder was created with
+``require_table=False``.  ``StringTableRef(index)`` forces a reference when the
+caller already knows the index.  See ``msgpack.strtable`` for the full API and
+``examples/strtable_demo.py`` for a two-partition demonstration.
+
 ### Advanced unpacking control
 
 As an alternative to iteration, `Unpacker` objects provide `unpack`,

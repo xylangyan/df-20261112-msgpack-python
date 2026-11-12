@@ -1,3 +1,16 @@
+# Unreleased
+
+- Add the optional `msgpack.strtable` string-table codec. `StringTablePacker`
+  encodes strings listed in an explicit per-partition table as compact
+  MessagePack extension references; `StringTableUnpacker` resolves them against
+  the table installed for the current decoder. Values outside the table remain
+  ordinary strings and nested objects, binary values and timestamps keep their
+  existing encoding. Tables are per-instance so decoders can be interleaved,
+  invalid indexes raise `InvalidStringTableIndexError` without falling back to
+  an earlier table, and references without a table raise
+  `MissingStringTableError`. The timestamp extension code `-1` is rejected with
+  `StringTableConflictError`.
+
 # 1.2.4
 
 Release Date: 2026-10-27

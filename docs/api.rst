@@ -31,6 +31,16 @@ API reference
     :members:
     :special-members: __init__
 
+String table
+------------
+
+Optional codec that encodes repeated strings as MessagePack extension
+references into an explicit per-partition table.
+
+.. automodule:: msgpack.strtable
+    :members:
+    :show-inheritance:
+
 exceptions
 ----------
 

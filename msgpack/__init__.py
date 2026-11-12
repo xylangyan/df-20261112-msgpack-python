@@ -53,3 +53,16 @@ loads = unpackb
 
 dump = pack
 dumps = packb
+
+from .strtable import (  # noqa: E402
+    DEFAULT_STRING_TABLE_EXT_CODE,
+    InvalidStringTableIndexError,
+    MissingStringTableError,
+    StringTableConflictError,
+    StringTableError,
+    StringTablePacker,
+    StringTableRef,
+    StringTableUnpacker,
+    packb_with_table,
+    unpackb_with_table,
+)
