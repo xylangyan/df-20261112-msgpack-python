@@ -11,6 +11,15 @@ class BufferFull(UnpackException):
     pass
 
 
+class FrozenBufferFull(Exception):
+    """The maximum number of unacknowledged frozen batches is reached.
+
+    Raised by :meth:`Packer.freeze` when ``max_unacked`` frozen batches are
+    still waiting for :meth:`Packer.ack`.  The caller must wait for an
+    acknowledgement before freezing the next batch (backpressure).
+    """
+
+
 class OutOfData(UnpackException):
     pass
 

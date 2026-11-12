@@ -2,6 +2,8 @@
 
 import struct
 import sys
+import threading
+import weakref
 from datetime import datetime as _DateTime
 
 if hasattr(sys, "pypy_version_info"):
@@ -48,7 +50,14 @@ else:
         pass
 
 
-from .exceptions import BufferFull, ExtraData, FormatError, OutOfData, StackError
+from .exceptions import (
+    BufferFull,
+    ExtraData,
+    FormatError,
+    FrozenBufferFull,
+    OutOfData,
+    StackError,
+)
 from .ext import ExtType, Timestamp
 
 EX_SKIP = 0
@@ -627,6 +636,84 @@ class Unpacker:
         return self._stream_offset
 
 
+class FrozenBatch:
+    """An immutable snapshot of a :class:`Packer` buffer.
+
+    Created by :meth:`Packer.freeze` for handing the accumulated bytes to
+    another thread while the packing thread keeps packing.  The snapshot is
+    independent of the packer's current buffer: later :meth:`Packer.pack`
+    calls and :meth:`Packer.reset` never change these bytes, so a failed send
+    can be retried until the batch is acknowledged.
+
+    The batch stays readable while it is unacknowledged.  Acknowledging it
+    through :meth:`Packer.ack` releases the snapshot: later :meth:`bytes` or
+    :meth:`getbuffer` calls raise ``ValueError``, while views handed out
+    before the acknowledgement remain valid.  Instances are not constructed
+    directly.  ``len(batch)`` is the number of bytes in the batch and
+    ``bytes(batch)`` returns the same bytes object.
+    """
+
+    __slots__ = ("seq", "_packer", "_data", "_lock")
+
+    def __init__(self, packer, seq, data):
+        self.seq = seq
+        # Weak reference so an unacknowledged batch does not keep the
+        # packer alive (the packer already holds the batch via _unacked).
+        self._packer = weakref.ref(packer)
+        self._data = data
+        self._lock = threading.Lock()
+
+    def _release(self):
+        with self._lock:
+            self._data = None
+
+    def _snapshot(self):
+        with self._lock:
+            if self._data is None:
+                raise ValueError(f"frozen batch {self.seq} has been acknowledged")
+            return self._data
+
+    def getbuffer(self):
+        """Return a read-only ``memoryview`` of the frozen bytes.
+
+        The view stays usable until it is released (or garbage collected);
+        freezing, packing, resetting and acknowledging other batches do not
+        affect it.
+        """
+        return memoryview(self._snapshot())
+
+    def bytes(self):
+        """Return the frozen bytes.
+
+        The same ``bytes`` object is returned on every call, so it can be read
+        repeatedly -- for example to retry a failed send -- until the batch is
+        acknowledged.
+        """
+        return self._snapshot()
+
+    def ack(self):
+        """Acknowledge this batch; equivalent to ``packer.ack(batch.seq)``."""
+        packer = self._packer()
+        if packer is None:
+            return False
+        return packer.ack(self.seq)
+
+    def __bytes__(self):
+        return self._snapshot()
+
+    def __len__(self):
+        with self._lock:
+            data = self._data
+        return 0 if data is None else len(data)
+
+    def __repr__(self):
+        with self._lock:
+            data = self._data
+        if data is None:
+            return f"FrozenBatch(seq={self.seq}, acknowledged)"
+        return f"FrozenBatch(seq={self.seq}, size={len(data)})"
+
+
 class Packer:
     """
     MessagePack Packer
@@ -674,6 +761,11 @@ class Packer:
 
     :param int buf_size:
         Internal buffer size. This option is used only for C implementation.
+
+    :param int max_unacked:
+        Maximum number of batches frozen by :meth:`freeze` that may remain
+        unacknowledged at once. ``None`` (the default) means unlimited.
+        This option is used only for the pure Python implementation.
     """
 
     def __init__(
@@ -687,6 +779,7 @@ class Packer:
         datetime=False,
         unicode_errors=None,
         buf_size=None,
+        max_unacked=None,
     ):
         self._strict_types = strict_types
         self._use_float = use_single_float
@@ -698,6 +791,21 @@ class Packer:
         if default is not None and not callable(default):
             raise TypeError("default must be callable")
         self._default = default
+        if max_unacked is not None:
+            if not isinstance(max_unacked, int) or isinstance(max_unacked, bool):
+                raise TypeError("max_unacked must be an int or None")
+            if max_unacked <= 0:
+                raise ValueError("max_unacked must be a positive integer or None")
+        self._max_unacked = max_unacked
+        # Sequences of batches handed off with freeze() but not yet ack().
+        # Values are the immutable snapshots; dicts preserve insertion order
+        # and O(1) removal so late or duplicate acks are cheap.
+        self._unacked = {}
+        self._next_seq = 0
+        # Serializes buffer mutation against another thread reading a frozen
+        # batch or acknowledging it. An RLock keeps the pack entry points
+        # reentrant for the recursive _pack() calls.
+        self._lock = threading.RLock()
 
     def _pack(
         self,
@@ -825,44 +933,48 @@ class Packer:
             raise TypeError(f"Cannot serialize {obj!r}")
 
     def pack(self, obj):
-        try:
-            self._pack(obj)
-        except:
-            self._buffer = BytesIO()  # force reset
-            raise
-        if self._autoreset:
-            ret = self._buffer.getvalue()
-            self._buffer = BytesIO()
-            return ret
+        with self._lock:
+            try:
+                self._pack(obj)
+            except:
+                self._buffer = BytesIO()  # force reset
+                raise
+            if self._autoreset:
+                ret = self._buffer.getvalue()
+                self._buffer = BytesIO()
+                return ret
 
     def pack_map_pairs(self, pairs):
-        self._pack_map_pairs(len(pairs), pairs)
-        if self._autoreset:
-            ret = self._buffer.getvalue()
-            self._buffer = BytesIO()
-            return ret
+        with self._lock:
+            self._pack_map_pairs(len(pairs), pairs)
+            if self._autoreset:
+                ret = self._buffer.getvalue()
+                self._buffer = BytesIO()
+                return ret
 
     def pack_array_header(self, n):
         if n < 0:
             raise ValueError("array size must be non-negative")
         if n >= 2**32:
             raise ValueError
-        self._pack_array_header(n)
-        if self._autoreset:
-            ret = self._buffer.getvalue()
-            self._buffer = BytesIO()
-            return ret
+        with self._lock:
+            self._pack_array_header(n)
+            if self._autoreset:
+                ret = self._buffer.getvalue()
+                self._buffer = BytesIO()
+                return ret
 
     def pack_map_header(self, n):
         if n < 0:
             raise ValueError("map size must be non-negative")
         if n >= 2**32:
             raise ValueError
-        self._pack_map_header(n)
-        if self._autoreset:
-            ret = self._buffer.getvalue()
-            self._buffer = BytesIO()
-            return ret
+        with self._lock:
+            self._pack_map_header(n)
+            if self._autoreset:
+                ret = self._buffer.getvalue()
+                self._buffer = BytesIO()
+                return ret
 
     def pack_ext_type(self, typecode, data):
         if not isinstance(typecode, int):
@@ -874,28 +986,29 @@ class Packer:
         L = len(data)
         if L > 0xFFFFFFFF:
             raise ValueError("Too large data")
-        if L == 1:
-            self._buffer.write(b"\xd4")
-        elif L == 2:
-            self._buffer.write(b"\xd5")
-        elif L == 4:
-            self._buffer.write(b"\xd6")
-        elif L == 8:
-            self._buffer.write(b"\xd7")
-        elif L == 16:
-            self._buffer.write(b"\xd8")
-        elif L <= 0xFF:
-            self._buffer.write(b"\xc7" + struct.pack("B", L))
-        elif L <= 0xFFFF:
-            self._buffer.write(b"\xc8" + struct.pack(">H", L))
-        else:
-            self._buffer.write(b"\xc9" + struct.pack(">I", L))
-        self._buffer.write(struct.pack("B", typecode))
-        self._buffer.write(data)
-        if self._autoreset:
-            ret = self._buffer.getvalue()
-            self._buffer = BytesIO()
-            return ret
+        with self._lock:
+            if L == 1:
+                self._buffer.write(b"\xd4")
+            elif L == 2:
+                self._buffer.write(b"\xd5")
+            elif L == 4:
+                self._buffer.write(b"\xd6")
+            elif L == 8:
+                self._buffer.write(b"\xd7")
+            elif L == 16:
+                self._buffer.write(b"\xd8")
+            elif L <= 0xFF:
+                self._buffer.write(b"\xc7" + struct.pack("B", L))
+            elif L <= 0xFFFF:
+                self._buffer.write(b"\xc8" + struct.pack(">H", L))
+            else:
+                self._buffer.write(b"\xc9" + struct.pack(">I", L))
+            self._buffer.write(struct.pack("B", typecode))
+            self._buffer.write(data)
+            if self._autoreset:
+                ret = self._buffer.getvalue()
+                self._buffer = BytesIO()
+                return ret
 
     def _pack_array_header(self, n):
         if n <= 0x0F:
@@ -947,18 +1060,82 @@ class Packer:
 
     def bytes(self):
         """Return internal buffer contents as bytes object"""
-        return self._buffer.getvalue()
+        with self._lock:
+            return self._buffer.getvalue()
 
     def reset(self):
         """Reset internal buffer.
 
         This method is useful only when autoreset=False.
+        Batches handed off with :meth:`freeze` are not affected.
         """
-        self._buffer = BytesIO()
+        with self._lock:
+            self._buffer = BytesIO()
 
     def getbuffer(self):
         """Return view of internal buffer."""
-        if _USING_STRINGBUILDER:
-            return memoryview(self.bytes())
-        else:
-            return self._buffer.getbuffer()
+        with self._lock:
+            if _USING_STRINGBUILDER:
+                return memoryview(self.bytes())
+            else:
+                return self._buffer.getbuffer()
+
+    def freeze(self):
+        """Freeze the accumulated buffer and hand it off as a batch.
+
+        Returns a :class:`FrozenBatch` holding an immutable snapshot of the
+        bytes packed so far, and clears the internal buffer so that
+        subsequent :meth:`pack` calls start a fresh batch without touching
+        the handed-off bytes.
+
+        The returned batch can be read repeatedly (for example to retry a
+        failed send) until it is released with :meth:`ack`.  Later
+        :meth:`pack` calls and :meth:`reset` never change the frozen bytes.
+
+        Raises :class:`FrozenBufferFull` when ``max_unacked`` batches are
+        still waiting for :meth:`ack`; the internal buffer is left untouched
+        in that case so the batch can be frozen again after an
+        acknowledgement arrives.  This is how ``max_unacked`` applies
+        backpressure to the packing thread.
+        """
+        with self._lock:
+            if self._max_unacked is not None and len(self._unacked) >= self._max_unacked:
+                raise FrozenBufferFull(
+                    f"{self._max_unacked} frozen batch(es) still unacknowledged"
+                )
+            seq = self._next_seq
+            self._next_seq += 1
+            batch = FrozenBatch(self, seq, self._buffer.getvalue())
+            self._buffer = BytesIO()
+            self._unacked[seq] = batch
+            return batch
+
+    def ack(self, seq):
+        """Acknowledge a frozen batch and release its snapshot.
+
+        ``seq`` is the ``seq`` attribute of a batch returned by
+        :meth:`freeze`.  Acknowledging a batch frees a slot counted by
+        ``max_unacked`` and drops the packer's reference to the snapshot, so
+        the bytes are reclaimed once the consumer releases its own
+        references.
+
+        Acknowledging a batch that is not outstanding -- an unknown,
+        already-acknowledged (duplicate) or otherwise late ``seq`` -- is a
+        no-op and never affects newer batches.  Returns ``True`` when an
+        outstanding batch was released, ``False`` otherwise.
+        """
+        with self._lock:
+            batch = self._unacked.pop(seq, None)
+            if batch is None:
+                return False
+            batch._release()
+            return True
+
+    def pending(self):
+        """Return the frozen batches still waiting for :meth:`ack`.
+
+        Batches are ordered by sequence number, oldest first.  Useful for
+        retransmitting everything that has not been acknowledged.
+        """
+        with self._lock:
+            return list(self._unacked.values())

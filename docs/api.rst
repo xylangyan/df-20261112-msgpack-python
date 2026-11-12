@@ -22,6 +22,9 @@ API reference
 .. autoclass:: Packer
     :members:
 
+.. autoclass:: FrozenBatch
+    :members:
+
 .. autoclass:: Unpacker
     :members:
 

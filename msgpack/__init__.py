@@ -9,12 +9,15 @@ __version__ = "1.2.4"
 
 
 if os.environ.get("MSGPACK_PUREPYTHON"):
-    from .fallback import Packer, Unpacker, unpackb
+    from .fallback import FrozenBatch, Packer, Unpacker, unpackb
 else:
     try:
         from ._cmsgpack import Packer, Unpacker, unpackb
     except ImportError:
-        from .fallback import Packer, Unpacker, unpackb
+        from .fallback import FrozenBatch, Packer, Unpacker, unpackb
+    else:
+        # freeze()/ack() handoff is only implemented by the pure Python Packer.
+        from .fallback import FrozenBatch
 
 
 def pack(o, stream, **kwargs):

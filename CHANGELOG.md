@@ -1,3 +1,13 @@
+# Unreleased
+
+- Add an explicit freeze and handoff interface to the pure Python `Packer`:
+  `freeze()` snapshots the accumulated buffer into an immutable `FrozenBatch`
+  that another thread can read and resend until it is released with `ack()`.
+  The `max_unacked` option caps the number of unacknowledged batches and
+  raises `FrozenBufferFull` to apply backpressure. `bytes()` and
+  `getbuffer()` conventions are unchanged.
+
+
 # 1.2.4
 
 Release Date: 2026-10-27
