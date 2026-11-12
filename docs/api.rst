@@ -31,6 +31,9 @@ API reference
     :members:
     :special-members: __init__
 
+See :doc:`timestamp` for the wire formats, unpacking modes, and their
+rounding and overflow boundaries.
+
 exceptions
 ----------
 
