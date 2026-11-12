@@ -25,6 +25,8 @@ API reference
 .. autoclass:: Unpacker
     :members:
 
+.. autoclass:: Record
+
 .. autoclass:: ExtType
 
 .. autoclass:: Timestamp

@@ -1,3 +1,21 @@
+# Unreleased
+
+- Add `Unpacker.unpack_record()` to the pure Python unpacker. It returns a
+  `Record(value, start, end)` carrying the committed byte offsets of the
+  record alongside its value, so streaming consumers can persist exact
+  record boundaries without guessing where to re-read.
+- Add `IncompleteRecord` and `InvalidRecord` exceptions. An incomplete
+  record (the fed bytes end mid-record) leaves the position untouched and
+  can be finished by feeding the remaining bytes; invalid data is reported
+  at the start of the bad record instead of a generic failure.
+- Define the committed offset semantics of `skip()`,
+  `read_array_header()`, and `read_map_header()`. `skip()` no longer
+  silently commits an incomplete record in the pure Python unpacker; it
+  raises `OutOfData` with the position rolled back to the record start.
+  Container header readers commit only the header.
+- The committed offset returned by `tell()` is independent of how
+  `feed()` calls split the byte stream.
+
 # 1.2.4
 
 Release Date: 2026-10-27

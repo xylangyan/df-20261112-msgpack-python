@@ -3,6 +3,7 @@
 import struct
 import sys
 from datetime import datetime as _DateTime
+from typing import NamedTuple
 
 if hasattr(sys, "pypy_version_info"):
     from __pypy__ import newlist_hint
@@ -48,7 +49,15 @@ else:
         pass
 
 
-from .exceptions import BufferFull, ExtraData, FormatError, OutOfData, StackError
+from .exceptions import (
+    BufferFull,
+    ExtraData,
+    FormatError,
+    IncompleteRecord,
+    InvalidRecord,
+    OutOfData,
+    StackError,
+)
 from .ext import ExtType, Timestamp
 
 EX_SKIP = 0
@@ -78,6 +87,36 @@ def _get_data_from_buffer(obj):
     if view.itemsize != 1:
         raise ValueError("cannot unpack from multi-byte object")
     return view
+
+
+class Record(NamedTuple):
+    """One complete record read from a stream, with its byte boundaries.
+
+    *value* is the unpacked object.  *start* is the committed stream offset
+    of the record's first byte and *end* is the offset just past its last
+    byte, so ``end - start`` is the record's size in bytes.  Unpacks like a
+    plain ``(value, start, end)`` tuple.
+    """
+
+    value: object
+    start: int
+    end: int
+
+    @property
+    def obj(self):
+        return self.value
+
+    @property
+    def start_offset(self):
+        return self.start
+
+    @property
+    def end_offset(self):
+        return self.end
+
+    @property
+    def size(self):
+        return self.end - self.start
 
 
 def unpackb(packed, **kwargs):
@@ -227,6 +266,33 @@ class Unpacker:
             for o in unpacker:
                 process(o)
 
+    Record boundaries and stream positions::
+
+        unpacker = Unpacker()
+        unpacker.feed(chunk)
+        try:
+            record = unpacker.unpack_record()
+        except IncompleteRecord as e:
+            # ``e.offset`` equals ``unpacker.tell()``: resume by feeding the
+            # remaining bytes of that record, starting at this byte position.
+            checkpoint = e.offset
+        else:
+            # ``record.start`` is the committed offset where the record
+            # begins and ``record.end`` is the offset just past its last
+            # byte; the position is committed at ``record.end``, so
+            # ``unpacker.tell() == record.end``.
+            checkpoint = record.end
+
+    ``tell()`` always returns the number of bytes of the byte stream whose
+    records have been fully consumed.  A record is committed only when it has
+    been completely processed by ``unpack()``, iteration, ``skip()``,
+    ``read_array_header()`` or ``read_map_header()``.  An incomplete record
+    never moves the committed position, so the same stream split into
+    differently sized ``feed()`` chunks yields identical ``tell()`` values.
+    Note that a container header is itself a complete record: after
+    ``read_array_header()`` / ``read_map_header()`` the committed position
+    points just past the header, at the first container element.
+
     Raises ``ExtraData`` when *packed* contains extra bytes.
     Raises ``OutOfData`` when *packed* is incomplete.
     Raises ``FormatError`` when *packed* is not valid msgpack.
@@ -327,6 +393,12 @@ class Unpacker:
             raise TypeError("`ext_hook` is not callable")
 
     def feed(self, next_bytes):
+        """Append bytes to the internal buffer.
+
+        Feeding never moves the committed position: ``tell()`` returns the
+        same value before and after a ``feed()`` call, no matter how the
+        byte stream is split into chunks.
+        """
         assert self._feeding
         view = _get_data_from_buffer(next_bytes)
         if len(self._buffer) - self._buff_i + len(view) > self._max_buffer_size:
@@ -599,13 +671,28 @@ class Unpacker:
     next = __next__
 
     def skip(self):
+        """Read and ignore one record.
+
+        On success the whole record is committed, so ``tell()`` advances
+        past its last byte.  If the record is incomplete, ``OutOfData`` is
+        raised, the position stays at the start of the record, and the
+        remaining bytes may be fed later.
+        """
         try:
             self._unpack(EX_SKIP)
-        except RecursionError:
-            raise StackError
+        except RecursionError as exc:
+            self._buff_i = self._buf_checkpoint
+            raise StackError from exc
+        except (OutOfData, FormatError, ValueError):
+            self._buff_i = self._buf_checkpoint
+            raise
         self._consume()
 
     def unpack(self):
+        """Unpack one record, returning its value.
+
+        The record is committed, so ``tell()`` advances past its last byte.
+        """
         try:
             ret = self._unpack(EX_CONSTRUCT)
         except RecursionError:
@@ -613,17 +700,77 @@ class Unpacker:
         self._consume()
         return ret
 
+    def unpack_record(self):
+        """Unpack one record, returning a :class:`Record`.
+
+        The record carries its byte boundaries: ``record.start`` is the
+        committed stream offset where the record begins and ``record.end``
+        is the offset just past its last byte.  The position is committed
+        at ``record.end``, so ``unpacker.tell() == record.end`` when this
+        returns.
+
+        Raises :class:`IncompleteRecord` if the fed bytes end in the middle
+        of a record.  The exception's ``offset`` (also ``unpacker.tell()``)
+        is the start of the incomplete record; feed the remaining bytes and
+        call ``unpack_record()`` again to resume.  Raises
+        :class:`InvalidRecord` if the record at the committed position is
+        not valid msgpack; the position stays there as well.
+        """
+        start = self._stream_offset
+        if self._buff_i != self._buf_checkpoint:
+            # A previous failed call left uncommitted bytes parsed; restart
+            # from the committed position so the reported offsets are exact.
+            self._buff_i = self._buf_checkpoint
+        try:
+            obj = self._unpack(EX_CONSTRUCT)
+        except OutOfData as exc:
+            # ``_reserve`` already rolled back to the checkpoint.  Only
+            # report an incomplete record when there really are unread
+            # bytes; a clean end of stream stays plain ``OutOfData``.
+            if self._buf_checkpoint < len(self._buffer):
+                raise IncompleteRecord(start) from exc
+            raise
+        except (FormatError, StackError, ValueError, RecursionError) as exc:
+            # Leave the position at the start of the invalid record.
+            self._buff_i = self._buf_checkpoint
+            raise InvalidRecord(start, str(exc)) from exc
+        self._consume()
+        # ``_consume()`` commits ``_buff_i``; with a fresh checkpoint that
+        # is exactly the offset just past the record.
+        return Record(obj, start, self._stream_offset)
+
+    # Aliases for the record boundary interface.
+    next_record = unpack_record
+    read_record = unpack_record
+    unpack_with_offsets = unpack_record
+
     def read_array_header(self):
+        """Read an array header, returning the number of its elements.
+
+        The header is a complete record: after this returns, ``tell()``
+        points just past the header, at the first element.
+        """
         ret = self._unpack(EX_READ_ARRAY_HEADER)
         self._consume()
         return ret
 
     def read_map_header(self):
+        """Read a map header, returning the number of its key-value pairs.
+
+        The header is a complete record: after this returns, ``tell()``
+        points just past the header, at the first key.
+        """
         ret = self._unpack(EX_READ_MAP_HEADER)
         self._consume()
         return ret
 
     def tell(self):
+        """Return the committed stream offset.
+
+        This is the number of bytes of the stream that belong to completely
+        consumed records, i.e. the position from which a restart can safely
+        re-read.  ``feed()`` never changes it.
+        """
         return self._stream_offset
 
 

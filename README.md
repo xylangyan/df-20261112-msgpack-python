@@ -150,6 +150,46 @@ the result, or ignoring it. The latter two methods return the number of elements
 in the upcoming container, so that each element in an array, or key-value pair
 in a map, can be unpacked or skipped individually.
 
+### Record boundaries and restartable offsets
+
+The pure Python `Unpacker` provides `unpack_record()` for treating a
+MessagePack stream as a sequence of records. It returns a
+`Record(value, start, end)`, where `start` is the stream offset of the
+record's first byte and `end` is the offset just past its last byte. The
+position is committed at `end`, so `unpacker.tell() == record.end`.
+
+`tell()` reports the committed offset, i.e. the number of bytes belonging
+to records that were fully consumed. Feeding data never changes it, and it
+does not depend on how the byte stream is split into `feed()` chunks. This
+makes it safe to persist `tell()` as a checkpoint and resume from that byte
+position later.
+
+An incomplete record raises `IncompleteRecord`, an `OutOfData` subclass
+whose `offset` is the record's start (also `unpacker.tell()`). Nothing is
+committed, so the remaining bytes can be fed and `unpack_record()` called
+again to finish the same record. Invalid data raises `InvalidRecord`, a
+`FormatError` subclass, and also leaves the position at the start of the
+bad record.
+
+`skip()` commits the whole record; `read_array_header()` and
+`read_map_header()` commit only the container header, leaving `tell()` at
+the first element or key. A failed `skip()` or header read commits nothing.
+
+```python
+unpacker = Unpacker()
+for chunk in chunks:
+    unpacker.feed(chunk)
+    while True:
+        try:
+            record = unpacker.unpack_record()
+        except IncompleteRecord:
+            break
+        except InvalidRecord:
+            # Recover according to your policy; the position is unchanged.
+            break
+        store(record.value, record.start, record.end)
+checkpoint = unpacker.tell()  # persist this byte offset
+```
 
 ## Notes
 

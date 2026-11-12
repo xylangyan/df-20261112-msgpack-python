@@ -9,12 +9,13 @@ __version__ = "1.2.4"
 
 
 if os.environ.get("MSGPACK_PUREPYTHON"):
-    from .fallback import Packer, Unpacker, unpackb
+    from .fallback import Packer, Record, Unpacker, unpackb
 else:
     try:
         from ._cmsgpack import Packer, Unpacker, unpackb
+        from .fallback import Record
     except ImportError:
-        from .fallback import Packer, Unpacker, unpackb
+        from .fallback import Packer, Record, Unpacker, unpackb
 
 
 def pack(o, stream, **kwargs):
