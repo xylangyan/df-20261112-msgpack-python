@@ -150,6 +150,26 @@ the result, or ignoring it. The latter two methods return the number of elements
 in the upcoming container, so that each element in an array, or key-value pair
 in a map, can be unpacked or skipped individually.
 
+### Projecting fields from map messages
+
+When each message is a map but only a few keys are needed, the pure Python
+`Unpacker.unpack_fields(fields)` reads the next map in a single streaming pass
+and returns a tuple with the requested values in the order of `fields` (a
+missing key becomes `None`). Only the selected values are constructed; the
+other pairs are skipped, so their bytes are still consumed — length limits
+apply — while `ext_hook`, `object_hook` and `object_pairs_hook` never run for
+them. Repeated keys behave like dict decoding, with the last occurrence
+winning. On success the stream is positioned right after the map, ready for
+the next record; truncated input raises `OutOfData` without consuming the
+incomplete record.
+
+```pycon
+>>> unpacker = msgpack.Unpacker()
+>>> unpacker.feed(msgpack.packb({"ts": 1, "value": 2, "blob": b"..."}))
+>>> unpacker.unpack_fields(("ts", "value"))
+(1, 2)
+```
+
 
 ## Notes
 

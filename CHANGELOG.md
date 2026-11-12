@@ -1,3 +1,13 @@
+# Unreleased
+
+- Add `Unpacker.unpack_fields()` to the pure Python unpacker. It projects
+  selected keys from the next map in one streaming pass, constructing only the
+  requested values while skipping every other pair (still consuming its bytes
+  and enforcing length limits, without running `ext_hook` or the map hooks).
+  Duplicate keys follow dict semantics (last occurrence wins), truncated input
+  raises `OutOfData` and leaves the record unconsumed, and the stream remains
+  positioned for the following record.
+
 # 1.2.4
 
 Release Date: 2026-10-27

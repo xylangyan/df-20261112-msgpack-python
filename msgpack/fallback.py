@@ -623,6 +623,55 @@ class Unpacker:
         self._consume()
         return ret
 
+    def unpack_fields(self, fields):
+        """Project selected keys out of the next msgpack map.
+
+        Only the values associated with the keys in *fields* are constructed;
+        every other pair is skipped with ``EX_SKIP`` so that its bytes are
+        still consumed while neither ``ext_hook`` nor the map hooks run for
+        it.  The whole map is read in a single streaming pass, without
+        building a dict for the message first.
+
+        A tuple holding the requested values, in the order of *fields*, is
+        returned.  A key that does not appear in the map yields ``None``.
+        When a key is present more than once, every occurrence is projected
+        and the last one wins, mirroring ordinary dict decoding.
+
+        Length limits (``max_str_len``, ``max_bin_len``, ``max_array_len``,
+        ``max_map_len`` and ``max_ext_len``) and the nesting limit are still
+        enforced while skipping.  Truncated input raises ``OutOfData``; in
+        that case, as with ``unpack()``, nothing past the last complete
+        object is consumed and feeding more bytes lets the stream continue.
+        When the next object is not a map, ``ValueError`` is raised and no
+        bytes are consumed.  On success the position is advanced past the
+        map, so the following record can be read from the same stream.
+
+        This entry point is provided by the pure Python implementation;
+        ``unpack()`` and the other decoding entries are unchanged.
+        """
+        fields = tuple(fields)
+        field_values = [None] * len(fields)
+        field_index = {field: index for index, field in enumerate(fields)}
+        try:
+            pair_count = self._unpack(EX_READ_MAP_HEADER)
+            for _ in range(pair_count):
+                key = self._unpack(EX_CONSTRUCT)
+                if self._strict_map_key and type(key) not in (str, bytes):
+                    raise ValueError("%s is not allowed for map key" % str(type(key)))
+                index = field_index.get(key)
+                if index is None:
+                    self._unpack(EX_SKIP)
+                else:
+                    field_values[index] = self._unpack(EX_CONSTRUCT)
+        except RecursionError:
+            raise StackError
+        self._consume()
+        return tuple(field_values)
+
+    # Synonyms for the field projection entry point.
+    unpack_projection = unpack_fields
+    unpack_map_fields = unpack_fields
+
     def tell(self):
         return self._stream_offset
 
